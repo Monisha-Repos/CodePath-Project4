@@ -1,13 +1,27 @@
 """
-Command line runner for the Music Recommender Simulation.
+Command line runner for TuneMatch.
 
-Runs the recommender for several user profiles and prints the top 5 for each.
+    python -m src.main                       # original demo: 8 fixed profiles (no LLM)
+    python -m src.main --ask "chill lofi"    # RAG: one plain-English request
+    python -m src.main --chat                # RAG: interactive, type 'quit' to exit
+    python -m src.main --ask "..." --no-llm  # RAG pipeline with the rule-based fallbacks only
 """
+
+import argparse
+import logging
+import os
 
 try:
     from src.recommender import load_songs, recommend_songs  # python -m src.main
+    from src.llm_client import GeminiClient, LLMError
+    from src.rag import answer_request, InputError, RAGResult
 except ImportError:
     from recommender import load_songs, recommend_songs  # python src/main.py
+    from llm_client import GeminiClient, LLMError
+    from rag import answer_request, InputError, RAGResult
+
+SONGS_PATH = "data/songs.csv"
+LOG_PATH = "logs/app.log"
 
 
 # genre_prefs / mood_prefs are shares of the user's listening history;
@@ -57,13 +71,108 @@ PROFILES = {
 }
 
 
-def main() -> None:
-    """Loads the catalog and prints the top 5 songs for every profile."""
-    songs = load_songs("data/songs.csv")
+def run_demo(songs: list) -> None:
+    """Prints the top 5 songs for every fixed profile (the original Project 3 demo)."""
     print(f"Loaded songs: {len(songs)}")
     for name, user_prefs in PROFILES.items():
         recommendations = recommend_songs(user_prefs, songs, k=5)
         print_recommendations(name, user_prefs, recommendations)
+
+
+def setup_logging() -> None:
+    """Writes a detailed log of every run to logs/app.log."""
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_PATH,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def make_llm(use_llm: bool):
+    """Returns a GeminiClient, or None (rules-only mode) if disabled or unavailable."""
+    if not use_llm:
+        return None
+    try:
+        return GeminiClient()
+    except LLMError as e:
+        logging.getLogger(__name__).warning("LLM unavailable: %s", e)
+        print(f"[!] {e}\n[!] Running in rules-only mode.\n")
+        return None
+
+
+def ask(request: str, songs: list, llm) -> None:
+    """Runs one request through the RAG pipeline and prints the answer."""
+    try:
+        result = answer_request(request, songs, llm)
+    except InputError as e:
+        print(f"[!] {e}")
+        return
+    print_rag_result(result)
+
+
+def print_rag_result(result: RAGResult) -> None:
+    """Prints how the request was understood, the picks, and reliability info."""
+    print("\n" + "=" * 60)
+    print(f'  Request: "{result.request}"')
+    print("=" * 60)
+
+    if result.off_topic:
+        print(f"  {result.note}\n")
+        return
+
+    p = result.profile
+    genres = ", ".join(f"{g} {w:.0%}" for g, w in p["genre_prefs"].items()) or "any"
+    moods = ", ".join(f"{m} {w:.0%}" for m, w in p["mood_prefs"].items()) or "any"
+    energy = "any" if p["energy"] is None else f"{p['energy']:.2f}"
+    acoustic = {True: "yes", False: "no", None: "any"}[p["likes_acoustic"]]
+    print(f"  Understood as -> genres: {genres} | moods: {moods} | energy: {energy} | acoustic: {acoustic}")
+    for warning in result.warnings:
+        print(f"  [!] {warning}")
+    print("-" * 60)
+
+    if result.intro:
+        print(f"\n  {result.intro}")
+    for rank, pick in enumerate(result.picks, start=1):
+        s = pick.song
+        print(f"\n  {rank}. {s['title']} by {s['artist']}  ({s['genre']} / {s['mood']}, match {pick.score:.2f})")
+        print(f"     {pick.why}")
+    if result.note:
+        print(f"\n  Note: {result.note}")
+
+    print("\n" + "-" * 60)
+    print(f"  Confidence: {result.confidence:.2f} | retrieved {len(result.retrieved)} candidates"
+          f" | parsed by: {result.parsed_by} | written by: {result.written_by}")
+    print()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="TuneMatch music recommender")
+    parser.add_argument("--ask", metavar="REQUEST", help="get recommendations for one plain-English request")
+    parser.add_argument("--chat", action="store_true", help="interactive mode")
+    parser.add_argument("--no-llm", action="store_true", help="skip Gemini and use the rule-based fallbacks")
+    args = parser.parse_args()
+
+    setup_logging()
+    songs = load_songs(SONGS_PATH)
+
+    if args.ask is None and not args.chat:
+        run_demo(songs)
+        return
+
+    llm = make_llm(not args.no_llm)
+    if args.ask is not None:
+        ask(args.ask, songs, llm)
+    if args.chat:
+        print("TuneMatch: describe what you want to hear (type 'quit' to exit).")
+        while True:
+            try:
+                request = input("\n> ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if request.strip().lower() in {"quit", "exit", "q"}:
+                break
+            ask(request, songs, llm)
 
 
 def print_recommendations(name: str, user_prefs: dict, recommendations: list) -> None:
