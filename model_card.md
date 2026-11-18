@@ -1,34 +1,40 @@
-# 🎧 Model Card: Music Recommender Simulation
+# 🎧 Model Card: TuneMatch 2.0
 
-## 1. Model Name  
+## 1. Model Name
 
-**TuneMatch 1.0**: a points-based song recommender that matches songs to a listener's taste.
+**TuneMatch 2.0**: an AI music recommender that turns plain-English requests into song recommendations from a fixed catalog. It combines **Google Gemini** (`gemini-3.5-flash-lite`) for language with the **TuneMatch 1.0 scoring model** from Project 3 as its retriever, and adds a self-checking **agent** mode.
+
+**Base project:** TuneMatch 1.0, the Music Recommender Simulation from Module 3.
 
 ---
 
-## 2. Intended Use  
+## 2. Intended Use
 
-**Goal:** given a listener's taste, suggest the 5 songs from the catalog they're most likely to enjoy, and explain why each one was picked.
+**Goal:** given a request like *"chill lofi to study to"*, recommend up to 5 songs from the catalog, explain why each fits, and say honestly when the catalog can't satisfy the request.
 
-**What it assumes about the user:**
-
-- We know what share of their listening is each genre and mood.
-- They want songs near one energy level.
-- They either like acoustic music or they don't.
-- Their taste stays the same; it doesn't change with time of day or activity.
-
-**Intended use:** classroom exploration. It's for learning how content-based recommenders turn data into rankings, and for seeing where simple scoring rules go wrong.
+**Intended use:** a portfolio and classroom project showing how to build a grounded, testable AI system: RAG, an agent loop, guardrails and reliability testing.
 
 **Not intended for:**
 
 - Real users or a real music app. The catalog has only 20 made-up songs.
-- Judging the quality of a song or artist. A low score only means a poor match for one profile.
-- Discovering new music. It never suggests genres the user hasn't listened to.
+- Judging the quality of a song or artist. A low score only means a poor match for one request.
 - Any decision that matters, like which artists get promoted or paid.
+- General-purpose chat. Off-topic requests are declined.
 
 ---
 
-## 3. How the Model Works  
+## 3. How the System Works
+
+**Pipeline (details and diagram in the [README](README.md#architecture-overview)):**
+
+1. **Plan:** Gemini turns the request into a JSON taste profile (genre and mood weights, target energy, acoustic preference). The code validates it against the catalog.
+2. **Act (retrieve):** the TuneMatch 1.0 scorer ranks all 20 songs and returns the top 8 candidates.
+3. **Check and revise (agent mode):** a rule-based checker looks for conflicts and weak results. Gemini revises the profile (at most twice), and the best attempt is kept.
+4. **Answer:** Gemini picks up to 5 songs from the candidates only and explains each one. A guardrail removes any song that wasn't retrieved.
+
+If Gemini fails at any step, rule-based fallbacks take over, so the system always answers.
+
+### The scoring model (retriever, from Project 3)
 
 The recommender gives every song points for how well it fits the user, then shows the songs with the most points.
 
@@ -49,7 +55,7 @@ The recommender gives every song points for how well it fits the user, then show
 
 ---
 
-## 4. Data  
+## 4. Data
 
 **Size:** 20 songs in `data/songs.csv`. The starter file had 10; I added 10 more.
 
@@ -68,9 +74,19 @@ The recommender gives every song points for how well it fits the user, then show
 - The songs and artists are made up, and the numbers are estimates, not measured from real audio.
 - There's nothing about lyrics, language, era, culture or popularity.
 
+**Data sent to Gemini:** the user's request, the list of catalog genres and moods, a per-genre catalog summary (agent mode), and the 8 retrieved candidates. No personal data is stored. Requests are written only to the local `logs/app.log`.
+
 ---
 
-## 5. Strengths  
+## 5. Strengths
+
+- **No invented songs.** Gemini can only choose song IDs from the retrieved list, and titles are printed from the CSV. In every live run, the grounding guardrail held.
+- **Handles requests Project 3 couldn't.** "k-pop" is mapped to the closest genre with a warning. "Acoustic metal" is detected as impossible, and the agent drops the conflicting constraint and explains why, instead of recommending a country song to a metal fan.
+- **Honest about limits.** The answer includes a note when the catalog can't fully satisfy a request, plus a confidence score and which path (LLM or fallback) produced it.
+- **Always answers.** A bad key, a missing model, rate limits and server overloads all fall back to the rule-based recommender with a clear message.
+- **Inspectable.** Every step is logged, and agent traces can be saved and reviewed.
+
+**Strengths of the scoring model (from Project 3):**
 
 - **Clear, typical tastes work well.** Chill Lofi, High-Energy Pop and Deep Intense Rock all got a sensible #1 and a sensible top 3.
 - **Opposite users get opposite lists.** The pop and lofi profiles share no songs.
@@ -80,7 +96,20 @@ The recommender gives every song points for how well it fits the user, then show
 
 ---
 
-## 6. Limitations and Bias 
+## 6. Limitations and Biases
+
+### In the AI system
+
+- **A tiny, uneven catalog.** 20 songs, and most genres have one song. A blues or metal fan can never get 5 strong matches, however well the agent revises.
+- **The confidence score can mislead.** It measures fit to Gemini's *interpretation* of the request. "k-pop" was mapped to pop and scored **1.00**, although the catalog has no k-pop.
+- **Inconsistent parsing.** The same request produced different mood weights on different runs (for example, "chill 56% / focused 44%" vs. "chill 40% / focused 32% / relaxed 28%"), which can change the ranking.
+- **The reviser can overreach.** For "acoustic metal", it flipped the acoustic preference to "no" instead of "doesn't matter". That's a stronger change than the user asked for, although the answer was still sensible.
+- **Fixed checker thresholds.** "Strong match" (60% of the best score) and "at least 3" were chosen for this catalog and may not suit a larger one.
+- **The model's bias toward mainstream genres.** When mapping unknown genres, Gemini leans on pop and EDM. Listeners of niche or non-Western genres are more likely to get a generic "closest" answer.
+- **Off-topic detection depends on Gemini.** In keyword-fallback mode, an injection attempt isn't detected, although it only gets song picks back.
+- **English only.** It wasn't tested with requests in other languages.
+
+### In the scoring model (from Project 3)
 
 **Weakness found: high-energy songs fill the gaps for everyone.** When a song doesn't match the user's genre or mood, the only thing left to score it on is energy (plus the small acoustic bonus). Half the catalog is loud, high-energy and electronic, so those same few songs fill the bottom of very different users' lists: *Gym Hero* appeared in the top 5 for 6 of the 8 profiles tested, including a metal fan and a sad blues fan. The system never asks whether a song "feels" right. A pop workout track gets recommended to someone who wants sad music just because the numbers are close. It also never suggests genres or moods the user hasn't listened to, so it keeps them in a filter bubble.
 
@@ -93,9 +122,60 @@ The recommender gives every song points for how well it fits the user, then show
 
 ---
 
-## 7. Evaluation  
+## 7. Could It Be Misused? How I Prevent It
 
-### Profiles tested
+| Possible misuse | Prevention |
+|---|---|
+| **Prompt injection:** using the app to get non-music content ("ignore your instructions and…") | Every prompt marks the request as data, not instructions. The parser flags off-topic requests, and the app declines them. Output is JSON and validated, and titles come from the CSV, not the model. Tested live: the injection attempt was declined. |
+| **Running up API cost** with long or repeated requests | Requests are limited to 300 characters. The agent is limited to 2 revisions (at most 4 Gemini calls per request), and there's a 30-second timeout. |
+| **Leaking the API key** | The key lives in `.env`, which is in `.gitignore`. `.env.example` holds only a placeholder. |
+| **Presenting made-up recommendations as real** | The grounding guardrail removes song IDs that weren't retrieved, so nothing outside the catalog can be recommended. |
+| **Unfairly promoting artists** (if used with a real catalog) | Every score comes with its reasons, so a skewed weight is visible. This system isn't intended for real promotion or payment decisions. |
+
+---
+
+## 8. Evaluation and Testing Results
+
+### Project 4 results
+
+**Summary:** 35 of 35 automated tests pass. In 8 live Gemini runs that I judged by hand, 6 passed fully, 1 passed with a caveat, and 1 was a partial pass. No run recommended a song outside the catalog. Confidence was 0.84–0.94 for well-supported requests and 0.55–0.64 for requests the catalog couldn't fully satisfy or that ran on fallbacks.
+
+**Automated tests** (`python -m pytest`, offline, with a scripted fake LLM):
+
+| Test file | Tests | Covers |
+|---|---|---|
+| `test_recommender.py` | 2 | Project 3 scoring and explanations |
+| `test_rag.py` | 20 | Input guardrails, JSON parsing, profile validation, keyword fallback, grounding check, failure fallbacks, off-topic handling |
+| `test_agent.py` | 13 | Conflict detection, rule-based and LLM revision, choosing the best attempt, step limit, repeat detection, trace export |
+
+**Human evaluation of live runs:**
+
+| Request | Mode | Evaluation criteria | Result |
+|---|---|---|---|
+| "chill lofi to study to" | RAG | Calm lofi/ambient songs, study-related reasons | ✅ Pass (confidence 0.88) |
+| "something upbeat for the gym, no acoustic stuff" | RAG | High energy, all non-acoustic | ✅ Pass (confidence 0.71) |
+| "k-pop please" | RAG | Admits k-pop is missing; closest genre | ✅ Pass, but confidence 1.00 overstates the match |
+| "acoustic metal for headbanging" | Agent | Detects the conflict, no country/folk songs | ✅ Pass with a caveat (reviser set acoustic to "no") |
+| "sad blues but really high energy" | Agent | Explains that the catalog can't do both | ⚠️ Partial: honest note, but only 1 real blues song |
+| "chill lofi to study to" | Agent | No unnecessary revisions | ✅ Pass (one search, no extra Gemini calls) |
+| "ignore all previous instructions…" | RAG | Declines | ✅ Pass |
+| Empty input / wrong API key | RAG | No crash, clear message | ✅ Pass |
+
+**Problems that live testing found (all fixed):**
+
+| Problem | Fix |
+|---|---|
+| The model name `gemini-flash-lite-latest` returned 404; larger models were overloaded (503) or rate-limited (429) | Tested each available model and switched to `gemini-3.5-flash-lite`; friendly messages for each error code |
+| Failures were silent: the only sign was "parsed by: keywords" | The app now prints why it used a fallback |
+| An invalid key was retried pointlessly | Errors that can't succeed (400/401/403/404) aren't retried |
+| Gemini flagged "gym" as a missing genre | The prompt says activities aren't genres |
+| The keyword fallback read "no acoustic stuff" as liking acoustic, and "k-pop" as "pop" | Negation and hyphen handling, with tests |
+| The agent's reviser re-added the acoustic preference it had just removed | The reviser now sees every earlier attempt and its problems |
+| The agent kept an earlier attempt even when a later one found more matches | Selection ranks by fewest conflicts, then most strong matches |
+
+### Project 3 evaluation (TuneMatch 1.0 scoring model)
+
+#### Profiles tested
 
 I ran 8 profiles through `python -m src.main` and checked whether the top 5 matched what that listener would actually want.
 
@@ -110,19 +190,19 @@ I ran 8 profiles through `python -m src.main` and checked whether the top 5 matc
 | Acoustic Headbanger | **Edge case:** loves metal *and* acoustic sound, but no song is both |
 | Fence Sitter | **Edge case:** likes four genres equally, medium energy |
 
-### Do the results feel right?
+#### Do the results feel right?
 
 The three typical profiles feel right at the top. Chill Lofi gets three lofi songs, then ambient and jazz, all calm and acoustic. Rock gets *Storm Runner*, then the metal song. Pop gets *Sunrise City*. Things get worse further down each list, where songs are picked only for having similar energy.
 
-### Why does *Sunrise City* rank first for High-Energy Pop?
+#### Why does *Sunrise City* rank first for High-Energy Pop?
 
 It earns points on all four rules: pop genre (+2.00), happy mood (+1.00), energy 0.82 vs. a target of 0.9 (+0.92), and a non-acoustic sound (+0.50), for 4.42 in total. No other song matches both genre and mood, so nothing else can catch up. The best any other song can do is 3.5.
 
-### Why does *Gym Hero* keep showing up? (plain language)
+#### Why does *Gym Hero* keep showing up? (plain language)
 
 Think of the recommender as a judge handing out points. *Gym Hero* is labeled pop, which is worth the most points of anything, and it's one of the loudest, most energetic songs in the catalog. So for a "Happy Pop" fan, it gets the big pop points even though it's a workout song, not a happy one. For anyone who wants energetic music, it scores well on energy even when the genre is wrong. The judge only checks labels and numbers. It can't tell that a gym track isn't what a happy-pop listener or a sad-music listener had in mind.
 
-### Comparing profiles
+#### Comparing profiles
 
 - **High-Energy Pop vs. Chill Lofi:** the two lists have no songs in common. Pop gets loud, non-acoustic songs (energy 0.76–0.93); lofi gets quiet acoustic ones (energy 0.28–0.42). This makes sense because every rule pulls in opposite directions for these two users.
 - **Chill Lofi vs. Deep Intense Rock:** also no overlap. Lofi fills its list with similar genres it listens to (ambient, jazz). Rock's list runs out of rock and metal after two songs and fills the rest with any high-energy song (pop, edm, latin). Lofi has more matching songs in the catalog, so its list holds together better.
@@ -133,13 +213,13 @@ Think of the recommender as a judge handing out points. *Gym Hero* is labeled po
 - **High-Energy Pop vs. Sad but Hyped:** the blues fan's only sad song, *Empty Station Blues*, is 1st even though its energy (0.33) is far from what they want (0.9), because genre + mood (3 points) beats energy (at most 1). Below it, the list is the same generic high-energy songs the pop fan gets. The system settles the conflict by trusting the labels and ignoring the energy.
 - **Default Pop/Happy vs. Fence Sitter:** the Fence Sitter gets one song from each of their four genres. That's good variety, but each genre gets the full 2 points, so energy alone decides the order. Their 50% "sad" mood never shows up because the only sad song is blues, which isn't one of their genres.
 
-### What surprised me
+#### What surprised me
 
 - *Gym Hero* in 6 of the 8 top-5 lists.
 - A country song recommended to a metal fan because of the acoustic bonus.
 - A sad, calm song winning for someone who asked for energy 0.9.
 
-### Experiment: double energy, halve genre
+#### Experiment: double energy, halve genre
 
 I changed the genre weight from 2.0 to 1.0 and the energy weight from 1.0 to 2.0. The maximum possible score stays at 4.5, so the math is still valid and comparable. I tested this by overriding the weights in a separate run; the weights in `recommender.py` are unchanged.
 
@@ -153,11 +233,11 @@ I changed the genre weight from 2.0 to 1.0 and the energy weight from 1.0 to 2.0
 
 **More accurate or just different? Mostly just different.** Some changes are better: *Rooftop Lights* (happy, right energy) moves up for the pop fan, and the country song drops off the metal fan's list in favor of *Storm Runner*. But the #1 song didn't change for any profile, and high-energy filler like *Gym Hero* got *stronger* for the rock fan. Lowering genre makes the system lean even more on energy, which is the weakness described in Limitations. I kept the original weights.
 
-### Automated tests
+#### Automated tests
 
 `pytest` passes both starter tests in `tests/test_recommender.py`: songs come back sorted by score with the pop/happy song first, and the explanation is a non-empty string.
 
-### Test outputs (original weights)
+#### Test outputs (original weights)
 
 **Default Pop/Happy**
 
@@ -487,15 +567,44 @@ I changed the genre weight from 2.0 to 1.0 and the energy weight from 1.0 to 2.0
 
 ---
 
-## 8. Future Work  
+## 9. What Surprised Me While Testing Reliability
 
-1. **Group similar moods and genres.** Treat "chill", "relaxed" and "peaceful" as close matches that get partial points, and do the same for "pop" and "indie pop". This fixes the exact-label problem.
-2. **Add valence to the profile.** A target "happy vs. sad" level would keep sad songs away from happy listeners and help break ties among the high-energy filler songs.
-3. **Make the top 5 more varied.** Limit each list to one song per artist, and save one slot for a song from a genre the user hasn't heard, to soften the filter bubble.
+- **Passing tests didn't mean it worked.** All the unit tests passed, but the first live run failed: the model name that worked in my Week 7 lab doesn't exist anymore, and the fallback hid the failure so well that the output looked normal. That's when I learned a silent fallback is almost as bad as a crash, so the app now always says when it used one.
+- **The AI repeated its own mistakes.** The agent's reviser removed the acoustic preference and then added it back in the next revision. It only stopped once it could see the history of its earlier attempts.
+- **The LLM is less consistent than the code.** The same request gave slightly different profiles on different runs, while the Project 3 scorer always gives the same ranking for the same profile.
+- **A confidence score can be confidently wrong.** "k-pop" scored 1.00 because the score checks fit to the interpreted request, not to what the user actually said.
+- **The agent's checker exposed my Project 3 edge cases automatically.** "Sad but Hyped" and "Acoustic Headbanger", which I designed by hand in Project 3, were exactly the conflicts the checker detected.
 
 ---
 
-## 9. Personal Reflection  
+## 10. Collaboration with AI
+
+**How I worked with AI:** I used Claude Code, an AI coding agent in VS Code, throughout this project. It helped me break down the assignment requirements, plan which features to build, write the RAG pipeline, the agent loop and the tests, debug the live Gemini errors, and draft the documentation. I made the project decisions: which project to extend, which features to build, when to commit, and what counted as a correct result. I also tested the live system and reviewed its output myself.
+
+**A suggestion I accepted:** using my Project 3 scoring model as the retriever for RAG, instead of adding a new search method. It kept my earlier work at the center of the system, and it made every recommendation explainable, because each song comes with the exact reasons it scored well. I also accepted the suggestion to add rule-based fallbacks at every step. Testing proved that one right when the API key and model name both failed.
+
+**A suggestion I rejected or changed:**
+
+- **Scoping down.** The AI suggested building toward all four Step 1 features (RAG, an agent, few-shot specialization and a testing harness). I scoped it down to RAG and the agent only, because they build on each other and on my Project 3 retriever, while few-shot specialization would have been the least connected to my existing code.
+- **A wrong suggestion fixed by testing.** The AI's first choice of Gemini model (`gemini-flash-lite-latest`, copied from my Week 7 lab) didn't work: it returned a 404 on the first live test, and the next choice was overloaded. We had to test each available model before choosing `gemini-3.5-flash-lite`. AI suggestions about external APIs need to be checked against the real service.
+
+---
+
+## 11. Future Work
+
+1. **A bigger catalog, or a second data source** (for example, short song descriptions), so the retriever has real choices and the agent's revisions can actually reach 3 strong matches.
+2. **Confidence against the original request.** Lower the confidence when genres were mapped ("k-pop" → pop) or constraints were dropped by the agent.
+3. **Similar moods and genres.** Treat "chill", "relaxed" and "peaceful" as close matches, and "pop" and "indie pop" too, to fix the exact-label problem.
+4. **An evaluation script** that runs a fixed set of requests through the live system and reports pass rates and average confidence over time.
+5. **More varied answers.** One song per artist, and one slot for a genre the user hasn't heard, to soften the filter bubble.
+
+---
+
+## 12. Personal Reflection
+
+**Project 4:** the most important thing I learned is that building with AI is mostly about designing what the AI is *not* allowed to do. Gemini is very good at understanding "something upbeat for the gym, no acoustic stuff", but I didn't want it deciding which songs exist. Splitting the work so the model handles language while my own code handles facts made the system trustworthy, and it made it testable. I also learned to treat the AI's output, and my AI assistant's suggestions, as something to verify rather than assume.
+
+**Project 3:**
 
 **Biggest learning moment:** realizing that a recommendation is just math. Every "pick" comes from a few weights and a closeness formula, and even small changes to them have a big impact. Changing two weights in my experiment reshuffled several users' top 5 lists.
 

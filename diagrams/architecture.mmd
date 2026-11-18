@@ -1,0 +1,57 @@
+flowchart TD
+    U(["👤 User request<br/>--ask / --chat, optional --agent"]) --> G1{"Input guardrail:<br/>empty or over 300 chars?"}
+    G1 -->|yes| X1["Reject with a friendly message"]
+    G1 -->|no| P
+
+    subgraph PLAN ["1. PLAN: understand the request"]
+        P["Gemini parser<br/>request → taste profile JSON"]
+        PF["Keyword parser<br/>fallback if Gemini fails"]
+        V{"Validate profile<br/>catalog genres/moods only<br/>energy clamped 0–1"}
+        P --> V
+        P -.->|API error / bad JSON| PF
+        PF --> V
+    end
+
+    V -->|off-topic / injection| X2["Decline: music requests only"]
+    V -->|profile| S
+
+    subgraph ACT ["2. ACT: retrieve candidates (RAG)"]
+        DB[("data/songs.csv")]
+        S["search_catalog()<br/>Project 3 scorer → top 8 songs"]
+        DB --> S
+    end
+
+    S --> M{"Agent mode?"}
+    M -->|no| W
+    M -->|yes| C
+
+    subgraph AGENT ["3. CHECK + REVISE: agent mode"]
+        C{"Checker<br/>energy or acoustic conflict?<br/>fewer than 3 strong matches?"}
+        RV["Gemini reviser<br/>new profile from problems + past attempts<br/>rule-based fallback"]
+        B["Choose best attempt<br/>fewest conflicts, then most strong matches"]
+        C -->|problems, under 2 revisions| RV
+        C -->|OK / limit reached / repeat| B
+    end
+    RV -->|retry search| S
+    B --> W
+
+    subgraph ANSWER ["4. ANSWER: grounded generation"]
+        W["Gemini writer<br/>picks up to 5 songs ONLY from candidates<br/>one-line reason each"]
+        VP{"Grounding guardrail<br/>drop song ids that weren't retrieved"}
+        RB["Rule-based picks<br/>fallback"]
+        W --> VP
+        W -.->|API error / no valid picks| RB
+    end
+
+    VP --> OUT(["Recommendations + reasons<br/>confidence score, warnings, agent steps"])
+    RB --> OUT
+    OUT -.-> LOG[("logs/app.log<br/>traces/*.md")]
+
+    subgraph TESTING ["Testing and human review"]
+        T["pytest: 35 offline tests<br/>fake LLM, guardrails, agent loop"]
+        H["👤 Human review<br/>read saved traces and outputs"]
+    end
+    T -.->|verifies| PLAN
+    T -.->|verifies| AGENT
+    T -.->|verifies| ANSWER
+    H -.->|reviews| LOG
