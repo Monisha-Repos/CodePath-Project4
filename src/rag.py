@@ -357,12 +357,10 @@ def rule_based_picks(retrieved, n: int) -> List[Pick]:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def answer_request(text: str, songs: List[Dict], llm=None,
-                   k: int = RETRIEVE_K, n: int = PICKS_N) -> RAGResult:
+def understand_request(text: str, songs: List[Dict], llm=None) -> RAGResult:
     """
-    Runs the full RAG pipeline. `llm` is any object with
-    generate(prompt, json_output=False) -> str, or None for rules-only mode.
-    Raises InputError for unusable requests.
+    Steps 1 + guardrails: check the input, parse it, and validate the profile.
+    Returns a RAGResult with .profile set (or .off_topic). Raises InputError.
     """
     text = check_input(text)
     logger.info("Request: %r", text)
@@ -380,13 +378,21 @@ def answer_request(text: str, songs: List[Dict], llm=None,
         return result
 
     result.profile, result.warnings = validate_profile(raw, genres, moods)
-    max_score = max_possible_score(result.profile)
+    return result
 
-    result.retrieved = retrieve(result.profile, songs, k)
+
+def write_answer(result: RAGResult, llm=None, n: int = PICKS_N,
+                 extra_notes: Optional[List[str]] = None) -> RAGResult:
+    """
+    Step 3 + guardrails: have the LLM pick from result.retrieved, verify the
+    picks, fall back to rule-based picks if needed, and set the confidence.
+    """
+    max_score = max_possible_score(result.profile)
+    notes = result.warnings + (extra_notes or [])
 
     if llm is not None:
         try:
-            prompt = build_generate_prompt(text, result.retrieved, result.warnings, max_score, n)
+            prompt = build_generate_prompt(result.request, result.retrieved, notes, max_score, n)
             answer = extract_json(llm.generate(prompt, json_output=True))
             result.picks, rejected = verify_picks(answer.get("picks"), result.retrieved, n)
             if rejected:
@@ -413,3 +419,17 @@ def answer_request(text: str, songs: List[Dict], llm=None,
         [p.song["id"] for p in result.picks], result.confidence, result.parsed_by, result.written_by,
     )
     return result
+
+
+def answer_request(text: str, songs: List[Dict], llm=None,
+                   k: int = RETRIEVE_K, n: int = PICKS_N) -> RAGResult:
+    """
+    Runs the full RAG pipeline once (no self-checking; see agent.py for that).
+    `llm` is any object with generate(prompt, json_output=False) -> str, or
+    None for rules-only mode. Raises InputError for unusable requests.
+    """
+    result = understand_request(text, songs, llm)
+    if result.off_topic:
+        return result
+    result.retrieved = retrieve(result.profile, songs, k)
+    return write_answer(result, llm, n)

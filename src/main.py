@@ -5,6 +5,9 @@ Command line runner for TuneMatch.
     python -m src.main --ask "chill lofi"    # RAG: one plain-English request
     python -m src.main --chat                # RAG: interactive, type 'quit' to exit
     python -m src.main --ask "..." --no-llm  # RAG pipeline with the rule-based fallbacks only
+
+    Add --agent to --ask/--chat to let the agent check and revise its search
+    before answering, and --save-trace to write its reasoning to traces/.
 """
 
 import argparse
@@ -15,10 +18,12 @@ try:
     from src.recommender import load_songs, recommend_songs  # python -m src.main
     from src.llm_client import GeminiClient, LLMError
     from src.rag import answer_request, InputError, RAGResult
+    from src.agent import AgentResult, describe_profile, run_agent, save_trace
 except ImportError:
     from recommender import load_songs, recommend_songs  # python src/main.py
     from llm_client import GeminiClient, LLMError
     from rag import answer_request, InputError, RAGResult
+    from agent import AgentResult, describe_profile, run_agent, save_trace
 
 SONGS_PATH = "data/songs.csv"
 LOG_PATH = "logs/app.log"
@@ -101,14 +106,25 @@ def make_llm(use_llm: bool):
         return None
 
 
-def ask(request: str, songs: list, llm) -> None:
-    """Runs one request through the RAG pipeline and prints the answer."""
+def ask(request: str, songs: list, llm, use_agent: bool = False, trace_file: bool = False) -> None:
+    """Runs one request through the RAG pipeline (or the agent) and prints the answer."""
     try:
-        result = answer_request(request, songs, llm)
+        result = run_agent(request, songs, llm) if use_agent else answer_request(request, songs, llm)
     except InputError as e:
         print(f"[!] {e}")
         return
     print_rag_result(result)
+    if use_agent and trace_file:
+        print(f"  Trace saved to {save_trace(result)}\n")
+
+
+def print_agent_steps(result: AgentResult) -> None:
+    """Prints the agent's plan / act / check / revise steps."""
+    print("  Agent steps:")
+    for i, step in enumerate(result.trace, start=1):
+        print(f"   {i}. {step.step:<6} {step.detail}")
+    for change in result.agent_changes:
+        print(f"  [agent] {change}")
 
 
 def print_rag_result(result: RAGResult) -> None:
@@ -123,12 +139,11 @@ def print_rag_result(result: RAGResult) -> None:
         print(f"  {result.note}\n")
         return
 
-    p = result.profile
-    genres = ", ".join(f"{g} {w:.0%}" for g, w in p["genre_prefs"].items()) or "any"
-    moods = ", ".join(f"{m} {w:.0%}" for m, w in p["mood_prefs"].items()) or "any"
-    energy = "any" if p["energy"] is None else f"{p['energy']:.2f}"
-    acoustic = {True: "yes", False: "no", None: "any"}[p["likes_acoustic"]]
-    print(f"  Understood as -> genres: {genres} | moods: {moods} | energy: {energy} | acoustic: {acoustic}")
+    if isinstance(result, AgentResult):
+        print_agent_steps(result)
+        print(f"  Final profile -> {describe_profile(result.profile)}")
+    else:
+        print(f"  Understood as -> {describe_profile(result.profile)}")
     for warning in result.warnings:
         print(f"  [!] {warning}")
     print("-" * 60)
@@ -153,6 +168,8 @@ def main() -> None:
     parser.add_argument("--ask", metavar="REQUEST", help="get recommendations for one plain-English request")
     parser.add_argument("--chat", action="store_true", help="interactive mode")
     parser.add_argument("--no-llm", action="store_true", help="skip Gemini and use the rule-based fallbacks")
+    parser.add_argument("--agent", action="store_true", help="let the agent check and revise its search before answering")
+    parser.add_argument("--save-trace", action="store_true", help="with --agent: save the reasoning trace to traces/")
     args = parser.parse_args()
 
     setup_logging()
@@ -164,7 +181,7 @@ def main() -> None:
 
     llm = make_llm(not args.no_llm)
     if args.ask is not None:
-        ask(args.ask, songs, llm)
+        ask(args.ask, songs, llm, args.agent, args.save_trace)
     if args.chat:
         print("TuneMatch: describe what you want to hear (type 'quit' to exit).")
         while True:
@@ -174,7 +191,7 @@ def main() -> None:
                 break
             if request.strip().lower() in {"quit", "exit", "q"}:
                 break
-            ask(request, songs, llm)
+            ask(request, songs, llm, args.agent, args.save_trace)
 
 
 def print_recommendations(name: str, user_prefs: dict, recommendations: list) -> None:
