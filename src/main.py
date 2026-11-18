@@ -116,6 +116,8 @@ def print_rag_result(result: RAGResult) -> None:
     print("\n" + "=" * 60)
     print(f'  Request: "{result.request}"')
     print("=" * 60)
+    for error in result.llm_errors:
+        print(f"  [!] {error} Using the rule-based fallback.")
 
     if result.off_topic:
         print(f"  {result.note}\n")

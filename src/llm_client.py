@@ -12,7 +12,12 @@ import time
 logger = logging.getLogger(__name__)
 
 # Override with the GEMINI_MODEL environment variable if needed.
-DEFAULT_MODEL = "gemini-flash-lite-latest"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
+TIMEOUT_MS = 30_000
+
+# HTTP status codes where retrying can't help.
+NO_RETRY_CODES = {400, 401, 403, 404}
 
 
 class LLMError(Exception):
@@ -37,7 +42,8 @@ class GeminiClient:
 
         from google import genai  # imported here so tests don't need the SDK
 
-        self.client = genai.Client(api_key=api_key)
+        # Timeout is in milliseconds, so a hung request can't freeze the app.
+        self.client = genai.Client(api_key=api_key, http_options={"timeout": TIMEOUT_MS})
         self.model = model or os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
         self.retries = retries
 
@@ -65,7 +71,24 @@ class GeminiClient:
             except Exception as e:  # network errors, rate limits, empty output
                 last_error = e
                 logger.warning("LLM call failed (attempt %d): %s: %s", attempt + 1, type(e).__name__, e)
+                # Bad key / bad request won't fix itself; only retry rate limits and server errors.
+                if getattr(e, "code", None) in NO_RETRY_CODES:
+                    break
                 if attempt < self.retries:
                     time.sleep(1.5)
 
-        raise LLMError(f"LLM call failed: {type(last_error).__name__}: {last_error}")
+        raise LLMError(describe_error(last_error))
+
+
+def describe_error(e: Exception) -> str:
+    """Short, user-friendly description of an API failure."""
+    code = getattr(e, "code", None)
+    if code in (400, 401, 403) and "API key" in str(e):
+        return "Gemini rejected the API key. Check GEMINI_API_KEY in your .env file."
+    if code == 429:
+        return "Gemini rate limit reached. Wait a minute and try again."
+    if code == 503:
+        return "Gemini is overloaded right now. Try again shortly."
+    if code == 404:
+        return "Gemini model not found. Check GEMINI_MODEL in your .env file."
+    return f"Gemini call failed ({type(e).__name__}: {str(e)[:150]})"

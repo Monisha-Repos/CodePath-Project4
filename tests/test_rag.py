@@ -89,6 +89,16 @@ def test_keyword_profile_prefers_longest_genre_name():
     assert raw["energy"] == 0.85
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("acoustic folk", True),
+    ("upbeat, no acoustic stuff", False),
+    ("non-acoustic rock", False),
+    ("rock", None),
+])
+def test_keyword_profile_handles_acoustic_negation(text, expected):
+    assert keyword_profile(text, GENRES, MOODS)["likes_acoustic"] is expected
+
+
 def test_keyword_profile_does_not_read_k_pop_as_pop():
     assert keyword_profile("k-pop please", GENRES, MOODS)["genre_prefs"] == {}
 
@@ -133,6 +143,7 @@ def test_pipeline_falls_back_to_rules_when_llm_fails():
 
     assert result.parsed_by == "keywords"
     assert result.written_by == "rules"
+    assert result.llm_errors == ["rate limited"]   # reported once, not hidden
     assert len(result.picks) == 5
     assert result.picks[0].song["genre"] == "pop"
 
